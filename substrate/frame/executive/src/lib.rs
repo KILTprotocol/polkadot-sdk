@@ -152,6 +152,9 @@ use ::{
 #[allow(dead_code)]
 const LOG_TARGET: &str = "runtime::executive";
 
+/// Maximum nesting level for extrinsics.
+pub const MAX_EXTRINSIC_DEPTH: u32 = 256;
+
 pub type CheckedOf<E, C> = <E as Checkable<C>>::Checked;
 pub type CallOf<E, C> = <CheckedOf<E, C> as Applyable>::Call;
 pub type OriginOf<E, C> = <CallOf<E, C> as Dispatchable>::RuntimeOrigin;
@@ -305,7 +308,7 @@ where
 					e,
 					err,
 				);
-				break
+				break;
 			}
 		}
 
@@ -536,9 +539,9 @@ where
 		// Check that `parent_hash` is correct.
 		let n = *header.number();
 		assert!(
-			n > BlockNumberFor::<System>::zero() &&
-				<frame_system::Pallet<System>>::block_hash(n - BlockNumberFor::<System>::one()) ==
-					*header.parent_hash(),
+			n > BlockNumberFor::<System>::zero()
+				&& <frame_system::Pallet<System>>::block_hash(n - BlockNumberFor::<System>::one())
+					== *header.parent_hash(),
 			"Parent hash should be valid.",
 		);
 
@@ -626,7 +629,14 @@ where
 		let encoded = uxt.encode();
 		let encoded_len = encoded.len();
 		sp_tracing::enter_span!(sp_tracing::info_span!("apply_extrinsic",
-				ext=?sp_core::hexdisplay::HexDisplay::from(&encoded)));
+			ext=?sp_core::hexdisplay::HexDisplay::from(&encoded)));
+
+		let uxt = <Block::Extrinsic as codec::DecodeLimit>::decode_all_with_depth_limit(
+			MAX_EXTRINSIC_DEPTH,
+			&mut &encoded[..],
+		)
+		.expect("Decoding the encoded transaction works; qed");
+
 		// Verify that the signature is good.
 		let xt = uxt.check(&Default::default())?;
 
@@ -646,7 +656,7 @@ where
 		// The entire block should be discarded if an inherent fails to apply. Otherwise
 		// it may open an attack vector.
 		if r.is_err() && dispatch_info.class == DispatchClass::Mandatory {
-			return Err(InvalidTransaction::BadMandatory.into())
+			return Err(InvalidTransaction::BadMandatory.into());
 		}
 
 		<frame_system::Pallet<System>>::note_applied_extrinsic(&r, dispatch_info);
@@ -703,9 +713,15 @@ where
 
 		enter_span! { sp_tracing::Level::TRACE, "validate_transaction" };
 
-		let encoded_len = within_span! { sp_tracing::Level::TRACE, "using_encoded";
-			uxt.using_encoded(|d| d.len())
+		let encoded = within_span! { sp_tracing::Level::TRACE, "using_encoded";
+			uxt.encode()
 		};
+
+		let uxt = <Block::Extrinsic as codec::DecodeLimit>::decode_all_with_depth_limit(
+			MAX_EXTRINSIC_DEPTH,
+			&mut &encoded[..],
+		)
+		.map_err(|_| InvalidTransaction::Call)?;
 
 		let xt = within_span! { sp_tracing::Level::TRACE, "check";
 			uxt.check(&Default::default())
@@ -716,12 +732,12 @@ where
 		};
 
 		if dispatch_info.class == DispatchClass::Mandatory {
-			return Err(InvalidTransaction::MandatoryValidation.into())
+			return Err(InvalidTransaction::MandatoryValidation.into());
 		}
 
 		within_span! {
 			sp_tracing::Level::TRACE, "validate";
-			xt.validate::<UnsignedValidator>(source, &dispatch_info, encoded_len)
+			xt.validate::<UnsignedValidator>(source, &dispatch_info, encoded.len())
 		}
 	}
 
@@ -1044,8 +1060,8 @@ mod tests {
 			.assimilate_storage(&mut t)
 			.unwrap();
 		let xt = TestXt::new(call_transfer(2, 69), sign_extra(1, 0, 0));
-		let weight = xt.get_dispatch_info().weight +
-			<Runtime as frame_system::Config>::BlockWeights::get()
+		let weight = xt.get_dispatch_info().weight
+			+ <Runtime as frame_system::Config>::BlockWeights::get()
 				.get(DispatchClass::Normal)
 				.base_extrinsic;
 		let fee: Balance =
@@ -1244,8 +1260,8 @@ mod tests {
 		let mut t = new_test_ext(1);
 		t.execute_with(|| {
 			// Block execution weight + on_initialize weight from custom module
-			let base_block_weight = Weight::from_parts(175, 0) +
-				<Runtime as frame_system::Config>::BlockWeights::get().base_block;
+			let base_block_weight = Weight::from_parts(175, 0)
+				+ <Runtime as frame_system::Config>::BlockWeights::get().base_block;
 
 			Executive::initialize_block(&Header::new(
 				1,
@@ -1263,8 +1279,8 @@ mod tests {
 			assert!(Executive::apply_extrinsic(x2.clone()).unwrap().is_ok());
 
 			// default weight for `TestXt` == encoded length.
-			let extrinsic_weight = Weight::from_parts(len as u64, 0) +
-				<Runtime as frame_system::Config>::BlockWeights::get()
+			let extrinsic_weight = Weight::from_parts(len as u64, 0)
+				+ <Runtime as frame_system::Config>::BlockWeights::get()
 					.get(DispatchClass::Normal)
 					.base_extrinsic;
 			assert_eq!(
@@ -1558,9 +1574,10 @@ mod tests {
 			// Weights are recorded correctly
 			assert_eq!(
 				frame_system::Pallet::<Runtime>::block_weight().total(),
-				custom_runtime_upgrade_weight +
-					runtime_upgrade_weight +
-					on_initialize_weight + base_block_weight,
+				custom_runtime_upgrade_weight
+					+ runtime_upgrade_weight
+					+ on_initialize_weight
+					+ base_block_weight,
 			);
 		});
 	}
